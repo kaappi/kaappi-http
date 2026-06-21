@@ -1,6 +1,7 @@
 (define-library (kaappi http server)
-  (import (scheme base) (scheme write) (kaappi http net) (kaappi http parse))
-  (export http-listen)
+  (import (scheme base) (scheme write)
+          (kaappi ffi) (kaappi http net) (kaappi http parse))
+  (export http-listen http-listen-prefork)
   (begin
 
     (define (handle-client handler client-fd)
@@ -17,6 +18,7 @@
           (http-send-all client-fd text)
           (tcp-close client-fd))))
 
+    ;; Sequential server
     (define (http-listen handler port . args)
       (let ((host (if (pair? args) (car args) "0.0.0.0")))
         (let ((listen-fd (tcp-listen host port)))
@@ -26,4 +28,44 @@
           (let loop ()
             (let ((client-fd (tcp-accept listen-fd)))
               (handle-client handler client-fd)
-              (loop))))))))
+              (loop))))))
+
+    ;; Pre-fork concurrent server — N OS processes sharing one listen socket.
+    (define %libc (ffi-open #f))
+    (define %fork (ffi-fn %libc "fork" '() 'int))
+    (define %exit (ffi-fn %libc "_exit" '(int) 'void))
+    (define %wait (ffi-fn %libc "wait" '(pointer) 'int))
+
+    (define (http-listen-prefork handler port workers . args)
+      (let ((host (if (pair? args) (car args) "0.0.0.0")))
+        (let ((listen-fd (tcp-listen host port)))
+          (display "Listening on ")
+          (display host) (display ":") (display port)
+          (display " (") (display workers) (display " workers)")
+          (newline)
+          ;; Fork worker processes — each inherits the listen socket
+          (let fork-loop ((i 0) (pids '()))
+            (if (= i workers)
+                ;; Parent: wait for all children
+                (begin
+                  (display "Workers started: ")
+                  (display (reverse pids))
+                  (newline)
+                  (let wait-loop ((n workers))
+                    (when (> n 0)
+                      (%wait 0)
+                      (wait-loop (- n 1)))))
+                ;; Fork a worker
+                (let ((pid (%fork)))
+                  (cond
+                    ((= pid 0)
+                     ;; Child: run accept loop (never returns)
+                     (let loop ()
+                       (let ((client-fd (tcp-accept listen-fd)))
+                         (handle-client handler client-fd)
+                         (loop))))
+                    ((> pid 0)
+                     ;; Parent: record child pid, fork next
+                     (fork-loop (+ i 1) (cons pid pids)))
+                    (else
+                     (error "fork failed")))))))))))
