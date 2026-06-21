@@ -80,15 +80,17 @@
     (define *buf-size* 8192)
 
     (define-record-type <http-buffer>
-      (%make-http-buffer bv pos end fd)
+      (%make-http-buffer bv pos end handle recv-fn)
       http-buffer?
-      (bv  buf-bv)
-      (pos buf-pos set-buf-pos!)
-      (end buf-end set-buf-end!)
-      (fd  buf-fd))
+      (bv      buf-bv)
+      (pos     buf-pos set-buf-pos!)
+      (end     buf-end set-buf-end!)
+      (handle  buf-handle)
+      (recv-fn buf-recv-fn))
 
-    (define (make-http-buffer fd)
-      (%make-http-buffer (make-bytevector *buf-size* 0) 0 0 fd))
+    (define (make-http-buffer handle . args)
+      (let ((recv-fn (if (pair? args) (car args) tcp-recv)))
+        (%make-http-buffer (make-bytevector *buf-size* 0) 0 0 handle recv-fn)))
 
     (define (buf-available buf)
       (- (buf-end buf) (buf-pos buf)))
@@ -108,7 +110,7 @@
           (when (<= space 0) (error "HTTP buffer full"))
           (let* ((base (ffi-bytevector-ptr bv))
                  (ptr  (+ base rem2))
-                 (n    (tcp-recv (buf-fd buf) ptr space)))
+                 (n    ((buf-recv-fn buf) (buf-handle buf) ptr space)))
             (when (= n 0) (error "Connection closed"))
             (set-buf-end! buf (+ rem2 n))))))
 
@@ -277,11 +279,16 @@
     ;; --- URL parser ---
 
     (define (parse-url url)
-      (let* ((after-scheme
-               (if (and (> (string-length url) 7)
-                        (equal? (substring url 0 7) "http://"))
-                   (substring url 7 (string-length url))
-                   url))
+      (let* ((https? (and (>= (string-length url) 8)
+                          (equal? (substring url 0 8) "https://")))
+             (http?  (and (not https?)
+                          (>= (string-length url) 7)
+                          (equal? (substring url 0 7) "http://")))
+             (default-port (if https? 443 80))
+             (after-scheme
+               (cond (https? (substring url 8 (string-length url)))
+                     (http?  (substring url 7 (string-length url)))
+                     (else   url)))
              (slash (string-find after-scheme #\/))
              (host-port (if slash
                             (substring after-scheme 0 slash)
@@ -295,9 +302,9 @@
                        (or (string->number
                              (substring host-port (+ colon 1)
                                         (string-length host-port)))
-                           80)
-                       80)))
-        (values host port path)))
+                           default-port)
+                       default-port)))
+        (values (if https? "https" "http") host port path)))
 
     ;; --- Query string parser ---
 
@@ -368,11 +375,12 @@
 
     ;; --- Send helper ---
 
-    (define (http-send-all fd str)
-      (let* ((bv (string->utf8 str))
-             (len (bytevector-length bv)))
-        (let loop ((offset 0) (remaining len))
-          (when (> remaining 0)
-            (let* ((ptr (+ (ffi-bytevector-ptr bv) offset))
-                   (n   (tcp-send fd ptr remaining)))
-              (loop (+ offset n) (- remaining n)))))))))
+    (define (http-send-all handle str . args)
+      (let ((send-fn (if (pair? args) (car args) tcp-send)))
+        (let* ((bv (string->utf8 str))
+               (len (bytevector-length bv)))
+          (let loop ((offset 0) (remaining len))
+            (when (> remaining 0)
+              (let* ((ptr (+ (ffi-bytevector-ptr bv) offset))
+                     (n   (send-fn handle ptr remaining)))
+                (loop (+ offset n) (- remaining n))))))))))

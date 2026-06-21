@@ -1,11 +1,13 @@
 (define-library (kaappi http net)
   (import (scheme base) (kaappi ffi))
   (export tcp-connect tcp-listen tcp-accept
-          tcp-send tcp-recv tcp-close tcp-last-error)
+          tcp-send tcp-recv tcp-close tcp-last-error
+          tls-connect tls-send tls-recv tls-close)
   (begin
 
     (define %lib (ffi-open "libkaappi_http"))
 
+    ;; TCP
     (define %connect  (ffi-fn %lib "khttp_tcp_connect" '(string int int) 'int))
     (define %listen   (ffi-fn %lib "khttp_tcp_listen" '(string int int) 'int))
     (define %accept   (ffi-fn %lib "khttp_tcp_accept" '(int) 'int))
@@ -13,6 +15,15 @@
     (define %recv     (ffi-fn %lib "khttp_tcp_recv" '(pointer pointer long) 'int))
     (define %close    (ffi-fn %lib "khttp_tcp_close" '(int) 'int))
     (define %last-error (ffi-fn %lib "khttp_last_error" '() 'int))
+
+    ;; TLS
+    (define %tls-set-host (ffi-fn %lib "khttp_tls_set_host" '(string) 'void))
+    (define %tls-connect  (ffi-fn %lib "khttp_tls_connect" '(long long) 'pointer))
+    (define %tls-send     (ffi-fn %lib "khttp_tls_send" '(pointer pointer long) 'int))
+    (define %tls-recv     (ffi-fn %lib "khttp_tls_recv" '(pointer pointer long) 'int))
+    (define %tls-close    (ffi-fn %lib "khttp_tls_close" '(pointer) 'void))
+
+    ;; --- TCP API ---
 
     (define (tcp-connect host port . args)
       (let ((timeout (if (pair? args) (car args) 5000)))
@@ -46,4 +57,25 @@
       (let ((rc (%close fd)))
         (if (< rc 0) (error "tcp-close failed" (%last-error)) rc)))
 
-    (define (tcp-last-error) (%last-error))))
+    (define (tcp-last-error) (%last-error))
+
+    ;; --- TLS API ---
+
+    (define (tls-connect host port . args)
+      (let ((timeout (if (pair? args) (car args) 5000)))
+        (%tls-set-host host)
+        (let ((ssl (%tls-connect port timeout)))
+          (if (= ssl 0)
+              (error "tls-connect failed" host port (%last-error))
+              ssl))))
+
+    (define (tls-send ssl buf len)
+      (let ((n (%tls-send buf ssl len)))
+        (if (< n 0) (error "tls-send failed" (%last-error)) n)))
+
+    (define (tls-recv ssl buf len)
+      (let ((n (%tls-recv buf ssl len)))
+        (if (< n 0) (error "tls-recv failed" (%last-error)) n)))
+
+    (define (tls-close ssl)
+      (%tls-close ssl))))

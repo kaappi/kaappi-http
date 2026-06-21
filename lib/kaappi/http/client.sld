@@ -4,16 +4,24 @@
   (begin
 
     (define (http-request method url headers body)
-      (let-values (((host port path) (parse-url url)))
-        (let* ((fd  (tcp-connect host port))
-               (buf (make-http-buffer fd))
-               (req (http-format-request method path
-                      (string-append host (if (= port 80) ""
-                                              (string-append ":" (number->string port))))
+      (let-values (((scheme host port path) (parse-url url)))
+        (let* ((tls? (equal? scheme "https"))
+               (handle (if tls?
+                           (tls-connect host port)
+                           (tcp-connect host port)))
+               (send-fn (if tls? tls-send tcp-send))
+               (recv-fn (if tls? tls-recv tcp-recv))
+               (close-fn (if tls? tls-close tcp-close))
+               (buf (make-http-buffer handle recv-fn))
+               (host-header
+                 (cond ((and tls? (= port 443)) host)
+                       ((and (not tls?) (= port 80)) host)
+                       (else (string-append host ":" (number->string port)))))
+               (req (http-format-request method path host-header
                       headers (or body ""))))
-          (http-send-all fd req)
+          (http-send-all handle req send-fn)
           (let ((resp (http-read-response buf)))
-            (tcp-close fd)
+            (close-fn handle)
             resp))))
 
     (define (http-get url . args)

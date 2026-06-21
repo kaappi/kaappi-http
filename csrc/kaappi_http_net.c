@@ -12,8 +12,12 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 static int last_errno = 0;
+static SSL_CTX *tls_ctx = NULL;
+static char tls_host[256] = {0};
 
 /* -----------------------------------------------------------------------
    Client: connect to host:port
@@ -136,4 +140,69 @@ int khttp_tcp_close(int fd) {
 /* () -> int */
 int khttp_last_error(void) {
     return last_errno;
+}
+
+/* -----------------------------------------------------------------------
+   TLS (OpenSSL)
+   ----------------------------------------------------------------------- */
+
+static void tls_init(void) {
+    if (tls_ctx) return;
+    tls_ctx = SSL_CTX_new(TLS_client_method());
+    SSL_CTX_set_default_verify_paths(tls_ctx);
+    SSL_CTX_set_verify(tls_ctx, SSL_VERIFY_PEER, NULL);
+}
+
+/* (string) -> void — store hostname for SNI + connect */
+void khttp_tls_set_host(const char *host) {
+    strncpy(tls_host, host, sizeof(tls_host) - 1);
+    tls_host[sizeof(tls_host) - 1] = '\0';
+}
+
+/* (long, long) -> pointer — TLS connect using stored host */
+void *khttp_tls_connect(long port, long timeout_ms) {
+    tls_init();
+    int fd = khttp_tcp_connect(tls_host, (int)port, (int)timeout_ms);
+    if (fd < 0) return NULL;
+
+    SSL *ssl = SSL_new(tls_ctx);
+    SSL_set_fd(ssl, fd);
+    SSL_set_tlsext_host_name(ssl, tls_host);
+    SSL_set1_host(ssl, tls_host);
+
+    if (SSL_connect(ssl) != 1) {
+        last_errno = (int)ERR_get_error();
+        SSL_free(ssl);
+        close(fd);
+        return NULL;
+    }
+    return ssl;
+}
+
+/* (pointer, pointer, long) -> int — send over TLS */
+int khttp_tls_send(void *buf, void *ssl_ptr, long len) {
+    int n = SSL_write((SSL *)ssl_ptr, buf, (int)len);
+    if (n <= 0) { last_errno = SSL_get_error((SSL *)ssl_ptr, n); return -1; }
+    return n;
+}
+
+/* (pointer, pointer, long) -> int — recv over TLS */
+int khttp_tls_recv(void *buf, void *ssl_ptr, long len) {
+    int n = SSL_read((SSL *)ssl_ptr, buf, (int)len);
+    if (n <= 0) {
+        int err = SSL_get_error((SSL *)ssl_ptr, n);
+        if (err == SSL_ERROR_ZERO_RETURN) return 0;
+        last_errno = err;
+        return -1;
+    }
+    return n;
+}
+
+/* (pointer) -> void — close TLS + underlying socket */
+void khttp_tls_close(void *ssl_ptr) {
+    SSL *ssl = (SSL *)ssl_ptr;
+    int fd = SSL_get_fd(ssl);
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    if (fd >= 0) close(fd);
 }

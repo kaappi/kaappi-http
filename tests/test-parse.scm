@@ -16,17 +16,28 @@
 ;; --- URL parsing ---
 (display "=== URL Parsing ===") (newline)
 
-(let-values (((host port path) (parse-url "http://example.com/api/users")))
+(let-values (((scheme host port path) (parse-url "http://example.com/api/users")))
+  (check "url scheme http" "http" scheme)
   (check "url host" "example.com" host)
   (check "url port default" 80 port)
   (check "url path" "/api/users" path))
 
-(let-values (((host port path) (parse-url "http://localhost:8080/test")))
+(let-values (((scheme host port path) (parse-url "https://api.example.com/v1")))
+  (check "url scheme https" "https" scheme)
+  (check "url https host" "api.example.com" host)
+  (check "url https port default" 443 port)
+  (check "url https path" "/v1" path))
+
+(let-values (((scheme host port path) (parse-url "http://localhost:8080/test")))
   (check "url host localhost" "localhost" host)
   (check "url port 8080" 8080 port)
   (check "url path /test" "/test" path))
 
-(let-values (((host port path) (parse-url "http://example.com")))
+(let-values (((scheme host port path) (parse-url "https://example.com:8443/secure")))
+  (check "url https custom port" 8443 port)
+  (check "url https custom path" "/secure" path))
+
+(let-values (((scheme host port path) (parse-url "http://example.com")))
   (check "url no path" "/" path))
 
 ;; --- Query string parsing ---
