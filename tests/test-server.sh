@@ -1,6 +1,6 @@
 #!/bin/bash
 # Integrated HTTP server test — starts server, curls it, checks responses.
-set -e
+set +e
 
 KAAPPI="${KAAPPI:-zig-out/bin/kaappi}"
 LIB_PATH="${LIB_PATH:-lib}"
