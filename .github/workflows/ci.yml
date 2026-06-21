@@ -18,7 +18,6 @@ jobs:
         with:
           version: 0.16.0
 
-
       - name: Build Kaappi
         run: |
           git clone --depth 1 https://github.com/kaappi/kaappi.git /tmp/kaappi
@@ -40,12 +39,10 @@ jobs:
             tests/test-parse.scm
         env:
           DYLD_LIBRARY_PATH: ${{ github.workspace }}:/tmp/kaappi-net
-          LD_LIBRARY_PATH: ${{ github.workspace }}:/tmp/kaappi-net
 
       - name: Run server tests
         run: |
           KAAPPI=/tmp/kaappi/zig-out/bin/kaappi \
           LIB_PATH=lib \
-          DYLD_LIBRARY_PATH=${{ github.workspace }}:/tmp/kaappi-net \
-          LD_LIBRARY_PATH=${{ github.workspace }}:/tmp/kaappi-net \
+          NET_DIR=/tmp/kaappi-net \
           bash tests/test-server.sh

@@ -23,8 +23,9 @@ check() {
 
 # Start server in background
 DIR="$(cd "$(dirname "$0")" && pwd)"
-NET_DIR="$DIR/../../kaappi-net"
+NET_DIR="${NET_DIR:-$DIR/../../kaappi-net}"
 export DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:+$DYLD_LIBRARY_PATH:}$DIR/..:$NET_DIR"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$DIR/..:$NET_DIR"
 $KAAPPI --lib-path "$NET_DIR/lib" --lib-path "$LIB_PATH" "$DIR/test-server-app.scm" &
 SERVER_PID=$!
 sleep 0.5
