@@ -30,7 +30,7 @@ $KAAPPI --lib-path "$NET_DIR/lib" --lib-path "$LIB_PATH" "$DIR/test-server-app.s
 SERVER_PID=$!
 sleep 0.5
 
-cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; }
+cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; true; }
 trap cleanup EXIT
 
 echo "=== GET / ==="
