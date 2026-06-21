@@ -56,4 +56,9 @@ check "GET /query body" "name=alice;age=30;" "$BODY"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
+
+# Kill server before exit to avoid SIGTERM polluting exit code
+kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; true
+trap - EXIT
+
 [ "$FAIL" -eq 0 ]
