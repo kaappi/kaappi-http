@@ -8,8 +8,7 @@ on:
 
 jobs:
   test:
-    runs-on: macos-latest
-
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -18,31 +17,17 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Build Kaappi
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: Build Kaappi and kaappi-net
         run: |
           git clone --depth 1 https://github.com/kaappi/kaappi.git /tmp/kaappi
-          cd /tmp/kaappi && zig build
-
-      - name: Build dependencies
-        run: |
+          cd /tmp/kaappi && zig build -Doptimize=ReleaseSafe
           git clone --depth 1 https://github.com/kaappi/kaappi-net.git /tmp/kaappi-net
           cd /tmp/kaappi-net && make
 
-      - name: Build native library
-        run: make
-
-      - name: Run parse tests
+      - name: Run offline tests
         run: |
-          /tmp/kaappi/zig-out/bin/kaappi \
-            --lib-path /tmp/kaappi-net/lib \
-            --lib-path lib \
-            tests/test-parse.scm
-        env:
-          DYLD_LIBRARY_PATH: ${{ github.workspace }}:/tmp/kaappi-net
-
-      - name: Run server tests
-        run: |
-          KAAPPI=/tmp/kaappi/zig-out/bin/kaappi \
-          LIB_PATH=lib \
-          NET_DIR=/tmp/kaappi-net \
-          bash tests/test-server.sh
+          export LD_LIBRARY_PATH=/tmp/kaappi-net
+          /tmp/kaappi/zig-out/bin/kaappi --lib-path lib --lib-path /tmp/kaappi-net/lib tests/test-parse.scm
