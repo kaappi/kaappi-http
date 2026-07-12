@@ -42,6 +42,18 @@ jobs:
           LD_LIBRARY_PATH: /tmp/kaappi-net
           DYLD_LIBRARY_PATH: /tmp/kaappi-net
 
+      # Loopback-socket integration test. Bounded well above its normal
+      # sub-second runtime: kaappi's own --timeout can't catch a hang here
+      # (it's checked in the bytecode dispatch loop, so it can't interrupt
+      # a blocked native accept()/recv() FFI call) — this step timeout is
+      # the actual guard against that class of regression.
+      - name: Run server tests
+        timeout-minutes: 3
+        run: /tmp/kaappi/zig-out/bin/kaappi --lib-path lib --lib-path /tmp/kaappi-net/lib tests/test-server.scm
+        env:
+          LD_LIBRARY_PATH: /tmp/kaappi-net
+          DYLD_LIBRARY_PATH: /tmp/kaappi-net
+
       - name: Upload to Codecov
         if: github.event_name == 'push' && matrix.os == 'ubuntu-latest'
         uses: codecov/codecov-action@v5
