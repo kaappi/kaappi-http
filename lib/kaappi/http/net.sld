@@ -3,4 +3,4 @@
   (export tcp-connect tcp-listen tcp-accept
           tcp-send tcp-recv tcp-close tcp-last-error
           tls-connect tls-send tls-recv tls-close
-          set-nonblocking poll-read nb-accept))
+          set-nonblocking poll-read poll-write nb-accept))

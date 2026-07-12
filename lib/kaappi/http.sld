@@ -6,7 +6,7 @@
     ;; Client
     http-request http-get http-post http-put http-delete http-head
     ;; Server
-    http-listen http-listen-threaded http-listen-prefork
+    http-listen http-listen-threaded http-listen-prefork http-listen-fiber
     ;; Request accessors
     make-http-request http-request?
     request-method request-path request-query request-version

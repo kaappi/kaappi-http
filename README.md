@@ -75,7 +75,10 @@ kaappi --lib-path /path/to/kaappi-http/lib your-script.scm
 
 | Procedure | Description |
 |---|---|
-| `(http-listen handler port [host])` | Start server (blocking) |
+| `(http-listen handler port [host])` | Start server (blocking, one connection at a time) |
+| `(http-listen-threaded handler port [host])` | One SRFI-18 OS thread per connection |
+| `(http-listen-prefork handler port workers [host])` | `workers` pre-forked processes |
+| `(http-listen-fiber handler port [host])` | Non-blocking accept loop, one fiber per connection — thousands of connections on a single OS thread |
 | `(make-response status body [headers])` | Create response |
 
 ### Request Accessors
@@ -113,7 +116,7 @@ kaappi --lib-path /path/to/kaappi-http/lib your-script.scm
 - HTTP/1.1 with `Connection: close`
 - Content-Length based bodies
 - `http://` URLs (no HTTPS)
-- Sequential request handling (one at a time)
+- Sequential, threaded, pre-forked, or fiber-based concurrency (see Server API)
 - URL query string parsing with percent-decoding
 
 ## Tests
@@ -124,6 +127,9 @@ kaappi --lib-path lib tests/test-parse.scm
 
 # Server integration tests (starts server, curls it)
 bash tests/test-server.sh
+
+# Fiber server concurrency test (slow client must not block a fast one)
+bash tests/test-fiber-server.sh
 ```
 
 ## Requirements
