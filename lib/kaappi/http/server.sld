@@ -1,22 +1,24 @@
 (define-library (kaappi http server)
   (import (scheme base) (scheme write)
-          (srfi 18) (kaappi ffi) (kaappi http net) (kaappi http parse))
-  (export http-listen http-listen-threaded http-listen-prefork)
+          (srfi 18) (kaappi fibers) (kaappi ffi) (kaappi http net) (kaappi http parse))
+  (export http-listen http-listen-threaded http-listen-prefork http-listen-fiber)
   (begin
 
-    (define (handle-client handler client-fd)
-      (guard (exn (#t (guard (e2 (#t #f)) (tcp-close client-fd))))
-        (let* ((buf (make-http-buffer client-fd))
-               (request (http-read-request buf))
-               (response (guard (exn (#t (make-response 500 "Internal Server Error")))
-                           (handler request)))
-               (text (http-format-response
-                       (response-status response)
-                       (response-reason response)
-                       (response-headers response)
-                       (response-body response))))
-          (http-send-all client-fd text)
-          (tcp-close client-fd))))
+    (define (handle-client handler client-fd . args)
+      (let ((recv-fn (if (pair? args) (car args) tcp-recv))
+            (send-fn (if (and (pair? args) (pair? (cdr args))) (cadr args) tcp-send)))
+        (guard (exn (#t (guard (e2 (#t #f)) (tcp-close client-fd))))
+          (let* ((buf (make-http-buffer client-fd recv-fn))
+                 (request (http-read-request buf))
+                 (response (guard (exn (#t (make-response 500 "Internal Server Error")))
+                             (handler request)))
+                 (text (http-format-response
+                         (response-status response)
+                         (response-reason response)
+                         (response-headers response)
+                         (response-body response))))
+            (http-send-all client-fd text send-fn)
+            (tcp-close client-fd)))))
 
     ;; Sequential server
     (define (http-listen handler port . args)
@@ -89,4 +91,46 @@
                     ((> pid 0)
                      (fork-loop (+ i 1) (cons pid pids)))
                     (else
-                     (error "fork failed")))))))))))
+                     (error "fork failed")))))))))
+
+    ;; Fiber server — non-blocking accept loop, one cheap fiber per
+    ;; connection, all on a single OS thread and GC heap.
+
+    ;; Interval a fiber parks for (via the reactor's timer heap, not a
+    ;; busy loop — see thread-sleep!) between readiness checks on a
+    ;; non-blocking fd. Short enough to stay responsive, long enough to
+    ;; avoid spinning the CPU while idle.
+    (define %poll-interval 0.001)
+
+    (define (fiber-recv fd ptr len)
+      (let loop ()
+        (let ((ready (poll-read fd 0)))
+          (cond
+            ((= ready 1) (tcp-recv fd ptr len))
+            ((= ready 0) (thread-sleep! %poll-interval) (loop))
+            (else (error "poll-read failed" (tcp-last-error)))))))
+
+    (define (fiber-send fd ptr len)
+      (let loop ()
+        (let ((ready (poll-write fd 0)))
+          (cond
+            ((= ready 1) (tcp-send fd ptr len))
+            ((= ready 0) (thread-sleep! %poll-interval) (loop))
+            (else (error "poll-write failed" (tcp-last-error)))))))
+
+    (define (http-listen-fiber handler port . args)
+      (let ((host (if (pair? args) (car args) "0.0.0.0")))
+        (let ((listen-fd (tcp-listen host port)))
+          (set-nonblocking listen-fd)
+          (display "Listening on ")
+          (display host) (display ":") (display port)
+          (display " (fiber)") (newline)
+          (let loop ()
+            (let ((client-fd (nb-accept listen-fd)))
+              (cond
+                ((= client-fd -2) (thread-sleep! %poll-interval))
+                ((< client-fd 0) (error "tcp-accept failed" (tcp-last-error)))
+                (else
+                 (set-nonblocking client-fd)
+                 (spawn (lambda () (handle-client handler client-fd fiber-recv fiber-send))))))
+            (loop)))))))
