@@ -79,6 +79,7 @@ kaappi --lib-path /path/to/kaappi-http/lib your-script.scm
 | `(http-listen-threaded handler port [host])` | One SRFI-18 OS thread per connection |
 | `(http-listen-prefork handler port workers [host])` | `workers` pre-forked processes |
 | `(http-listen-fiber handler port [host])` | Non-blocking accept loop, one fiber per connection — thousands of connections on a single OS thread |
+| `(http-listen-parallel handler port [thread-count [host]])` | Multi-core: N OS threads (default `processor-count`), each a fiber server. Linux balances accepts across per-thread `SO_REUSEPORT` sockets (threads × fibers); macOS falls back to one acceptor distributing fds to worker threads |
 | `(make-response status body [headers])` | Create response |
 
 ### Request Accessors

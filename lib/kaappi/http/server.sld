@@ -1,7 +1,8 @@
 (define-library (kaappi http server)
   (import (scheme base) (scheme write)
           (srfi 18) (kaappi fibers) (kaappi ffi) (kaappi http net) (kaappi http parse))
-  (export http-listen http-listen-threaded http-listen-prefork http-listen-fiber)
+  (export http-listen http-listen-threaded http-listen-prefork http-listen-fiber
+          http-listen-parallel)
   (begin
 
     (define (handle-client handler client-fd . args)
@@ -133,4 +134,110 @@
                 (else
                  (set-nonblocking client-fd)
                  (spawn (lambda () (handle-client handler client-fd fiber-recv fiber-send))))))
-            (loop)))))))
+            (loop)))))
+
+    ;; --- Multi-core server (KEP-0002 §9) ---
+    ;;
+    ;; Spreads serving across N OS threads. Blocks forever, like the other
+    ;; http-listen-* servers (shut down by terminating the process).
+    ;;
+    ;;   (http-listen-parallel handler port)               ; processor-count threads
+    ;;   (http-listen-parallel handler port thread-count)
+    ;;   (http-listen-parallel handler port thread-count host)
+    ;;
+    ;; Two paths, chosen at runtime by (reuseport-balances?):
+    ;;
+    ;;  * Linux -- each thread binds its OWN SO_REUSEPORT socket and runs a
+    ;;    full fiber accept loop; the kernel hashes inbound connections across
+    ;;    the sockets (measured near-uniform), so the machine serves
+    ;;    threads x fibers = cores x thousands-of-connections. No shared accept
+    ;;    state, no fd passing.
+    ;;
+    ;;  * Darwin/BSD -- SO_REUSEPORT does NOT balance there (every connection
+    ;;    lands on the last-bound socket -- measured in
+    ;;    kaappi-net/research/reuseport-accept-distribution/), so one acceptor
+    ;;    thread accepts on a single socket and hands each accepted fd (a plain
+    ;;    fixnum, valid process-wide) to a pool of worker threads over a shared
+    ;;    channel. Concurrency there is the worker count, not per-worker fibers
+    ;;    (see %parallel-distributor for why). This is a correctness fallback
+    ;;    for a kernel that refuses to balance; the Linux path is the fast one.
+
+    ;; One fiber accept loop on a fresh listen fd: accept, spawn a fiber per
+    ;; connection, forever. `open-listen` is a thunk so each caller (each
+    ;; thread on the reuseport path) opens its own socket.
+    (define (%fiber-accept-loop handler open-listen)
+      (let ((listen-fd (open-listen)))
+        (set-nonblocking listen-fd)
+        (let loop ()
+          (let ((client-fd (nb-accept listen-fd)))
+            (cond
+              ((= client-fd -2) (thread-sleep! %poll-interval))
+              ((< client-fd 0) (error "tcp-accept failed" (tcp-last-error)))
+              (else
+               (set-nonblocking client-fd)
+               (spawn (lambda () (handle-client handler client-fd fiber-recv fiber-send))))))
+          (loop))))
+
+    ;; Linux path: N threads, each its own SO_REUSEPORT socket + accept loop.
+    ;; The calling thread runs the Nth loop, so all N cores are used.
+    (define (%parallel-reuseport handler port host n)
+      (let spawn-loop ((i 1))
+        (if (< i n)
+            (begin
+              (thread-start!
+                (make-thread
+                  (lambda ()
+                    (%fiber-accept-loop handler
+                      (lambda () (tcp-listen-reuseport host port))))))
+              (spawn-loop (+ i 1)))
+            (%fiber-accept-loop handler
+              (lambda () (tcp-listen-reuseport host port))))))
+
+    ;; Darwin/BSD path: one acceptor thread + N worker threads + a shared fd
+    ;; channel (KEP-0002 §9). The acceptor pulls each connection off the single
+    ;; listen socket and hands its fd (a fixnum, valid process-wide) to a
+    ;; worker; each worker handles one connection to completion, then asks for
+    ;; the next. Concurrency is the worker count (one blocking connection per
+    ;; worker at a time), not per-worker fiber multiplexing: a secondary
+    ;; thread that parks on channel-receive does not run other ready fibers, so
+    ;; the reliable shape here is a blocking receive + a blocking handler
+    ;; rather than spawned fibers. The shared channel carries only fds and it
+    ;; stays shallow -- workers drain it about as fast as one acceptor fills
+    ;; it. This is the correctness fallback for a platform whose kernel refuses
+    ;; to balance SO_REUSEPORT; the kernel-balanced Linux path above keeps the
+    ;; full threads x fibers model.
+    (define (%parallel-distributor handler port host n)
+      (let ((fds (make-channel)))
+        (let spawn-loop ((i 0))
+          (when (< i n)
+            (thread-start!
+              (make-thread
+                (lambda ()
+                  ;; Blocking receive delivers reliably across threads; the
+                  ;; handler uses blocking tcp-recv/tcp-send (handle-client's
+                  ;; defaults) on this one connection.
+                  (let loop ((fd (channel-receive fds)))
+                    (unless (eof-object? fd)
+                      (handle-client handler fd)
+                      (loop (channel-receive fds)))))))
+            (spawn-loop (+ i 1))))
+        ;; Acceptor on the calling thread: blocking accept, hand fd to a
+        ;; worker, forever.
+        (let ((listen-fd (tcp-listen host port)))
+          (let loop ()
+            (channel-send fds (tcp-accept listen-fd))
+            (loop)))))
+
+    (define (http-listen-parallel handler port . args)
+      (let ((n (if (pair? args) (car args) (processor-count)))
+            (host (if (and (pair? args) (pair? (cdr args))) (cadr args) "0.0.0.0")))
+        (when (or (not (integer? n)) (not (exact? n)) (< n 1))
+          (error "http-listen-parallel: thread-count must be a positive integer" n))
+        (display "Listening on ")
+        (display host) (display ":") (display port)
+        (display " (parallel, ") (display n)
+        (display (if (reuseport-balances?) " x reuseport)" " x acceptor)"))
+        (newline)
+        (if (reuseport-balances?)
+            (%parallel-reuseport handler port host n)
+            (%parallel-distributor handler port host n))))))
