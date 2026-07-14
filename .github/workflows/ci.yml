@@ -54,6 +54,18 @@ jobs:
           LD_LIBRARY_PATH: /tmp/kaappi-net
           DYLD_LIBRARY_PATH: /tmp/kaappi-net
 
+      # Multi-core server under concurrent load (KEP-0002 §9): reuseport path
+      # on Linux, acceptor/worker fallback on macOS. Same accept()/recv() hang
+      # class as the fiber test, so the step timeout is the real guard.
+      - name: Run parallel server test
+        timeout-minutes: 3
+        run: bash tests/test-parallel-server.sh
+        env:
+          KAAPPI: /tmp/kaappi/zig-out/bin/kaappi
+          NET_DIR: /tmp/kaappi-net
+          LD_LIBRARY_PATH: /tmp/kaappi-net
+          DYLD_LIBRARY_PATH: /tmp/kaappi-net
+
       - name: Upload to Codecov
         if: github.event_name == 'push' && matrix.os == 'ubuntu-latest'
         uses: codecov/codecov-action@v5
