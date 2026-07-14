@@ -158,9 +158,11 @@
     ;;    kaappi-net/research/reuseport-accept-distribution/), so one acceptor
     ;;    thread accepts on a single socket and hands each accepted fd (a plain
     ;;    fixnum, valid process-wide) to a pool of worker threads over a shared
-    ;;    channel. Concurrency there is the worker count, not per-worker fibers
-    ;;    (see %parallel-distributor for why). This is a correctness fallback
-    ;;    for a kernel that refuses to balance; the Linux path is the fast one.
+    ;;    channel; each worker fiber-multiplexes its connections just like the
+    ;;    Linux path (see %parallel-distributor). Same threads x fibers model,
+    ;;    reached with a userspace distributor instead of the kernel. The
+    ;;    shared channel is the only cross-thread state and it stays shallow --
+    ;;    workers drain it about as fast as one acceptor fills it.
 
     ;; One fiber accept loop on a fresh listen fd: accept, spawn a fiber per
     ;; connection, forever. `open-listen` is a thunk so each caller (each
@@ -213,13 +215,21 @@
             (thread-start!
               (make-thread
                 (lambda ()
-                  ;; Blocking receive delivers reliably across threads; the
-                  ;; handler uses blocking tcp-recv/tcp-send (handle-client's
-                  ;; defaults) on this one connection.
-                  (let loop ((fd (channel-receive fds)))
-                    (unless (eof-object? fd)
-                      (handle-client handler fd)
-                      (loop (channel-receive fds)))))))
+                  ;; Poll the fd channel (zero timeout) rather than block on
+                  ;; it: a fiber that blocks in channel-receive freezes its
+                  ;; thread, but thread-sleep! yields to sibling fibers, so
+                  ;; polling + sleeping keeps every spawned connection handler
+                  ;; making progress while still picking up new fds. #f = empty
+                  ;; (fds are fixnums), eof = channel closed.
+                  (let loop ()
+                    (let ((fd (channel-receive fds 0 #f)))
+                      (cond
+                        ((eof-object? fd) #f)
+                        ((not fd) (thread-sleep! %poll-interval) (loop))
+                        (else
+                         (set-nonblocking fd)
+                         (spawn (lambda () (handle-client handler fd fiber-recv fiber-send)))
+                         (loop))))))))
             (spawn-loop (+ i 1))))
         ;; Acceptor on the calling thread: blocking accept, hand fd to a
         ;; worker, forever.
