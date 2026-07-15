@@ -88,9 +88,15 @@
       (handle  buf-handle)
       (recv-fn buf-recv-fn))
 
+    ;; `handle` is either a raw socket fd (a fixnum, read via recv-fn +
+    ;; ffi-bytevector-ptr) or a reactor-integrated Kaappi port (#1478). A port
+    ;; does its own buffering, so buf-read-byte!/buf-read-bytes! read straight
+    ;; from it and the software buffer below stays empty -- only the raw-fd
+    ;; path needs the *buf-size* scratch bytevector.
     (define (make-http-buffer handle . args)
-      (let ((recv-fn (if (pair? args) (car args) tcp-recv)))
-        (%make-http-buffer (make-bytevector *buf-size* 0) 0 0 handle recv-fn)))
+      (let ((recv-fn (if (pair? args) (car args) tcp-recv))
+            (bv (if (port? handle) (make-bytevector 0 0) (make-bytevector *buf-size* 0))))
+        (%make-http-buffer bv 0 0 handle recv-fn)))
 
     (define (buf-available buf)
       (- (buf-end buf) (buf-pos buf)))
@@ -115,25 +121,46 @@
             (set-buf-end! buf (+ rem2 n))))))
 
     (define (buf-read-byte! buf)
-      (when (= (buf-available buf) 0) (buf-refill! buf))
-      (let ((b (bytevector-u8-ref (buf-bv buf) (buf-pos buf))))
-        (set-buf-pos! buf (+ (buf-pos buf) 1))
-        b))
+      (let ((handle (buf-handle buf)))
+        (if (port? handle)
+            ;; Reactor-integrated socket port (#1478): read-u8 parks the
+            ;; calling fiber on the reactor until a byte is available instead
+            ;; of a poll-then-sleep spin; the port buffers a chunk so
+            ;; subsequent per-byte reads are served without a syscall.
+            (let ((b (read-u8 handle)))
+              (if (eof-object? b) (error "Connection closed") b))
+            (begin
+              (when (= (buf-available buf) 0) (buf-refill! buf))
+              (let ((b (bytevector-u8-ref (buf-bv buf) (buf-pos buf))))
+                (set-buf-pos! buf (+ (buf-pos buf) 1))
+                b)))))
 
     (define (buf-read-bytes! buf n)
-      (let ((result (make-bytevector n 0)))
-        (let loop ((offset 0) (remaining n))
-          (if (= remaining 0)
-              result
-              (let ((avail (buf-available buf)))
-                (if (= avail 0)
-                    (begin (buf-refill! buf) (loop offset remaining))
-                    (let ((take (min avail remaining)))
-                      (bytevector-copy! result offset
-                                        (buf-bv buf) (buf-pos buf)
-                                        (+ (buf-pos buf) take))
-                      (set-buf-pos! buf (+ (buf-pos buf) take))
-                      (loop (+ offset take) (- remaining take)))))))))
+      (let ((handle (buf-handle buf)))
+        (if (port? handle)
+            ;; Port path (#1478): read-bytevector! fills exactly n bytes,
+            ;; parking the fiber on the reactor between chunks. A short read
+            ;; (eof, or fewer than n) means the peer closed mid-body.
+            (let ((result (make-bytevector n 0)))
+              (if (= n 0)
+                  result
+                  (let ((r (read-bytevector! result handle 0 n)))
+                    (if (and (not (eof-object? r)) (= r n))
+                        result
+                        (error "Connection closed")))))
+            (let ((result (make-bytevector n 0)))
+              (let loop ((offset 0) (remaining n))
+                (if (= remaining 0)
+                    result
+                    (let ((avail (buf-available buf)))
+                      (if (= avail 0)
+                          (begin (buf-refill! buf) (loop offset remaining))
+                          (let ((take (min avail remaining)))
+                            (bytevector-copy! result offset
+                                              (buf-bv buf) (buf-pos buf)
+                                              (+ (buf-pos buf) take))
+                            (set-buf-pos! buf (+ (buf-pos buf) take))
+                            (loop (+ offset take) (- remaining take)))))))))))
 
     (define (buf-read-line! buf)
       (let ((out (open-output-string)))
@@ -377,10 +404,18 @@
 
     (define (http-send-all handle str . args)
       (let ((send-fn (if (pair? args) (car args) tcp-send)))
-        (let* ((bv (string->utf8 str))
-               (len (bytevector-length bv)))
-          (let loop ((offset 0) (remaining len))
-            (when (> remaining 0)
-              (let* ((ptr (+ (ffi-bytevector-ptr bv) offset))
-                     (n   (send-fn handle ptr remaining)))
-                (loop (+ offset n) (- remaining n))))))))))
+        (if (port? handle)
+            ;; Port path (#1478): write-bytevector buffers into the port and
+            ;; portWriteBytes drains it through the reactor, parking the fiber
+            ;; on EAGAIN instead of spinning; flush guarantees everything
+            ;; leaves before we return (the caller closes the port next).
+            (begin
+              (write-bytevector (string->utf8 str) handle)
+              (flush-output-port handle))
+            (let* ((bv (string->utf8 str))
+                   (len (bytevector-length bv)))
+              (let loop ((offset 0) (remaining len))
+                (when (> remaining 0)
+                  (let* ((ptr (+ (ffi-bytevector-ptr bv) offset))
+                         (n   (send-fn handle ptr remaining)))
+                    (loop (+ offset n) (- remaining n)))))))))))

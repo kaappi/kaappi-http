@@ -3,4 +3,5 @@
   (export tcp-connect tcp-listen tcp-listen-reuseport reuseport-balances? tcp-accept
           tcp-send tcp-recv tcp-close tcp-last-error
           tls-connect tls-send tls-recv tls-close
-          set-nonblocking poll-read poll-write nb-accept))
+          set-nonblocking poll-read poll-write nb-accept
+          socket-port tcp-connect-port tcp-accept-port))
