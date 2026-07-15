@@ -66,6 +66,20 @@ jobs:
           LD_LIBRARY_PATH: /tmp/kaappi-net
           DYLD_LIBRARY_PATH: /tmp/kaappi-net
 
+      # http-listen-fiber concurrency: a slow client trickling its body one
+      # byte at a time must not stall a fast client racing it. This is the
+      # acceptance criterion for the reactor-integrated fiber server (#1478) —
+      # the read must park the handler fiber on the reactor, and the accept
+      # loop must keep running off the main fiber while a handler drives.
+      - name: Run fiber server test
+        timeout-minutes: 3
+        run: bash tests/test-fiber-server.sh
+        env:
+          KAAPPI: /tmp/kaappi/zig-out/bin/kaappi
+          NET_DIR: /tmp/kaappi-net
+          LD_LIBRARY_PATH: /tmp/kaappi-net
+          DYLD_LIBRARY_PATH: /tmp/kaappi-net
+
       - name: Upload to Codecov
         if: github.event_name == 'push' && matrix.os == 'ubuntu-latest'
         uses: codecov/codecov-action@v5
