@@ -1,4 +1,5 @@
 name: kaappi-http
+version: 0.1.0
 depends: kaappi-net
 build: make
 kaappi-version: >=0.1.0
