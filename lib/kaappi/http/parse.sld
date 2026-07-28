@@ -33,8 +33,7 @@
       (%make-http-request method path query version headers body))
 
     (define (request-header req name)
-      (let ((pair (assoc name (request-headers req))))
-        (if pair (cdr pair) #f)))
+      (header-value (request-headers req) name))
 
     (define (request-query-params req)
       (let ((q (request-query req)))
@@ -55,8 +54,7 @@
         (%make-http-response status (status->reason status) headers body)))
 
     (define (response-header resp name)
-      (let ((pair (assoc name (response-headers resp))))
-        (if pair (cdr pair) #f)))
+      (header-value (response-headers resp) name))
 
     (define (status->reason code)
       (cond ((= code 200) "OK")
@@ -214,20 +212,87 @@
             (loop (+ i 1))))
         out))
 
+    ;; Case-insensitive per RFC 9110 5.1 -- headers parsed off the wire are
+    ;; already lowercased (read-headers), but make-response/make-http-request
+    ;; store whatever case the caller passed, so the comparison itself (not
+    ;; just the wire-parsing path) has to fold case.
     (define (header-value headers name)
-      (let ((pair (assoc name headers)))
-        (if pair (cdr pair) #f)))
+      (let ((name-lc (string-downcase name)))
+        (let loop ((lst headers))
+          (cond ((null? lst) #f)
+                ((equal? (string-downcase (caar lst)) name-lc) (cdar lst))
+                (else (loop (cdr lst)))))))
 
     ;; --- Read body ---
 
+    ;; Only a bare "chunked" coding is recognized -- Transfer-Encoding lists
+    ;; like "gzip, chunked" (chunked must be last, per RFC 9112 7.1) aren't
+    ;; matched, since this library has no content-coding decoder to pair
+    ;; with them anyway.
+    (define (chunked-transfer-encoding? headers)
+      (let ((te (header-value headers "transfer-encoding")))
+        (and te (equal? (trim-both (string-downcase te)) "chunked"))))
+
+    (define (trim-both s)
+      (let* ((len (string-length s))
+             (start (let loop ((i 0))
+                      (if (and (< i len) (char=? (string-ref s i) #\space))
+                          (loop (+ i 1))
+                          i)))
+             (end (let loop ((i len))
+                    (if (and (> i start) (char=? (string-ref s (- i 1)) #\space))
+                        (loop (- i 1))
+                        i))))
+        (substring s start end)))
+
+    (define (chunk-size-token line)
+      (let ((semi (string-find line #\;)))
+        (string-trim (if semi (substring line 0 semi) line))))
+
+    (define (read-chunk-size buf)
+      (let* ((line (buf-read-line! buf))
+             (tok  (chunk-size-token line))
+             (size (and (> (string-length tok) 0) (string->number tok 16))))
+        (or size (error "Malformed chunk size" line))))
+
+    ;; Trailer field lines (rare) followed by the terminating blank line.
+    (define (skip-chunk-trailer! buf)
+      (let loop ()
+        (let ((line (buf-read-line! buf)))
+          (if (equal? line "") #t (loop)))))
+
+    (define (concatenate-bytevectors chunks total)
+      (let ((result (make-bytevector total 0)))
+        (let loop ((lst chunks) (offset 0))
+          (if (null? lst)
+              result
+              (let* ((bv (car lst)) (len (bytevector-length bv)))
+                (bytevector-copy! result offset bv 0 len)
+                (loop (cdr lst) (+ offset len)))))))
+
+    (define (read-chunked-body buf)
+      (let loop ((chunks '()) (total 0))
+        (let ((size (read-chunk-size buf)))
+          (if (= size 0)
+              (begin
+                (skip-chunk-trailer! buf)
+                (concatenate-bytevectors (reverse chunks) total))
+              (let ((data (buf-read-bytes! buf size)))
+                (buf-read-line! buf) ;; consume CRLF following chunk-data
+                (loop (cons data chunks) (+ total size)))))))
+
     (define (read-body buf headers)
-      (let ((cl (header-value headers "content-length")))
-        (if cl
-            (let ((len (string->number cl)))
-              (if (and len (> len 0))
-                  (utf8->string (buf-read-bytes! buf len))
-                  ""))
-            "")))
+      (cond
+        ((chunked-transfer-encoding? headers)
+         (utf8->string (read-chunked-body buf)))
+        (else
+          (let ((cl (header-value headers "content-length")))
+            (if cl
+                (let ((len (string->number cl)))
+                  (if (and len (> len 0))
+                      (utf8->string (buf-read-bytes! buf len))
+                      ""))
+                "")))))
 
     ;; --- Request parser (for server) ---
 

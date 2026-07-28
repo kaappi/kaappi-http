@@ -1,6 +1,12 @@
 ;; Offline HTTP parsing tests (no network needed)
 (import (scheme base) (scheme write) (kaappi http parse))
 
+;; Feeds http-read-response/http-read-request from an in-memory byte source
+;; instead of a real socket -- make-http-buffer's port branch (#1478) reads
+;; via plain read-u8/read-bytevector!, so any binary input port works.
+(define (fake-response-from-bytes raw)
+  (http-read-response (make-http-buffer (open-input-bytevector (string->utf8 raw)))))
+
 (define pass 0)
 (define fail 0)
 
@@ -83,6 +89,75 @@
                               (char=? (string-ref req (+ i 2)) #\T))
                          #t (loop (+ i 1)))))))
       (if idx #t #f))))
+
+;; --- Header lookup case-insensitivity (#1746) ---
+(display "=== Header Lookup Case-Insensitivity ===") (newline)
+
+(let ((resp (make-response 200 "" '(("content-type" . "text/html")))))
+  (check "lowercase-stored, exact lookup" "text/html" (response-header resp "content-type"))
+  (check "lowercase-stored, mixed lookup" "text/html" (response-header resp "Content-Type"))
+  (check "lowercase-stored, upper lookup" "text/html" (response-header resp "CONTENT-TYPE")))
+
+(let ((resp (make-response 200 "" '(("Content-Type" . "text/html")))))
+  (check "mixed-stored, lower lookup" "text/html" (response-header resp "content-type")))
+
+(let ((req (make-http-request "GET" "/" "" "HTTP/1.1" '(("X-Token" . "abc")) "")))
+  (check "request-header case-insensitive" "abc" (request-header req "x-token")))
+
+;; --- Chunked transfer-encoding body decoding (#1746) ---
+(display "=== Chunked Transfer-Encoding ===") (newline)
+
+(let ((resp (fake-response-from-bytes
+              (string-append "HTTP/1.1 200 OK\r\n"
+                              "Transfer-Encoding: chunked\r\n"
+                              "\r\n"
+                              "5\r\nHello\r\n"
+                              "6\r\n World\r\n"
+                              "0\r\n"
+                              "\r\n"))))
+  (check "chunked status" 200 (response-status resp))
+  (check "chunked body assembled" "Hello World" (response-body resp))
+  (check "chunked transfer-encoding header preserved" "chunked"
+    (response-header resp "transfer-encoding")))
+
+;; A chunked response whose only chunk is the zero-length terminator.
+(let ((resp (fake-response-from-bytes
+              (string-append "HTTP/1.1 204 No Content\r\n"
+                              "Transfer-Encoding: chunked\r\n"
+                              "\r\n"
+                              "0\r\n"
+                              "\r\n"))))
+  (check "chunked empty body" "" (response-body resp)))
+
+;; Chunk extensions (";name=value" after the size) must be ignored.
+(let ((resp (fake-response-from-bytes
+              (string-append "HTTP/1.1 200 OK\r\n"
+                              "Transfer-Encoding: chunked\r\n"
+                              "\r\n"
+                              "3;ext=1\r\nabc\r\n"
+                              "0\r\n"
+                              "\r\n"))))
+  (check "chunked with chunk-extension" "abc" (response-body resp)))
+
+;; A trailer field line between the terminating chunk and the final blank
+;; line must be skipped rather than misread as body or a new status line.
+(let ((resp (fake-response-from-bytes
+              (string-append "HTTP/1.1 200 OK\r\n"
+                              "Transfer-Encoding: chunked\r\n"
+                              "\r\n"
+                              "2\r\nhi\r\n"
+                              "0\r\n"
+                              "X-Trailer: done\r\n"
+                              "\r\n"))))
+  (check "chunked with trailer" "hi" (response-body resp)))
+
+;; Content-Length responses must still work unchanged.
+(let ((resp (fake-response-from-bytes
+              (string-append "HTTP/1.1 200 OK\r\n"
+                              "Content-Length: 5\r\n"
+                              "\r\n"
+                              "Howdy"))))
+  (check "content-length body unaffected" "Howdy" (response-body resp)))
 
 (newline)
 (display "=== Results: ")
